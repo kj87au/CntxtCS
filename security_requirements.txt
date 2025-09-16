@@ -1,0 +1,18 @@
+# Security Requirements for CntxtCS
+# Install with: pip install -r security_requirements.txt
+
+# Core dependencies
+networkx>=2.6.0,<4.0
+matplotlib>=3.5.0,<4.0
+
+# Security enhancements
+pathlib2>=2.3.0  # Enhanced path handling for older Python versions
+validators>=0.18.0  # Input validation utilities
+
+# Development and testing
+pytest>=6.0.0  # For security testing
+bandit>=1.7.0  # Security linting
+safety>=2.0.0  # Dependency vulnerability scanning
+
+# Optional security tools
+cryptography>=3.4.0  # For secure hashing if needed

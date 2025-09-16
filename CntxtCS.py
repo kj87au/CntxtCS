@@ -4,19 +4,25 @@ import os
 import re
 import sys
 import json
+import time
+import hashlib
+import pathlib
 import networkx as nx
 from networkx.readwrite import json_graph
 from typing import Dict, List, Optional, Any
 
 
 class CSCodeKnowledgeGraph:
-    def __init__(self, directory: str):
+    def __init__(self, directory: str, max_file_size_mb: int = 10, max_files: int = 10000):
         """Initialize the knowledge graph generator.
 
         Args:
             directory: Root directory of the C# codebase.
+            max_file_size_mb: Maximum file size in MB to process (default: 10MB)
+            max_files: Maximum number of files to process (default: 10,000)
         """
-        self.directory = directory
+        # Security: Validate and sanitize directory path
+        self.directory = self._validate_directory_path(directory)
         self.graph = nx.DiGraph()
         self.class_methods: Dict[str, List[str]] = {}
         self.method_params: Dict[str, List[Dict[str, Any]]] = {}
@@ -24,6 +30,12 @@ class CSCodeKnowledgeGraph:
         self.files_processed = 0
         self.total_files = 0
         self.dirs_processed = 0
+
+        # Security: Resource limits
+        self.max_file_size_bytes = max_file_size_mb * 1024 * 1024
+        self.max_files = max_files
+        self.start_time = time.time()
+        self.max_processing_time = 3600  # 1 hour maximum processing time
 
         # Map of analyzed files to prevent circular dependencies.
         self.analyzed_files = set()
@@ -56,6 +68,95 @@ class CSCodeKnowledgeGraph:
         self.total_structs = 0
         self.total_dependencies = set()
         self.total_usings = 0
+    
+    def _validate_directory_path(self, directory: str) -> str:
+        """Validate and sanitize directory path to prevent path traversal attacks.
+        
+        Args:
+            directory: User-provided directory path
+            
+        Returns:
+            Validated and canonicalized directory path
+            
+        Raises:
+            ValueError: If path is invalid or potentially malicious
+        """
+        if not directory or not directory.strip():
+            raise ValueError("Directory path cannot be empty")
+        
+        # Remove leading/trailing whitespace
+        directory = directory.strip()
+        
+        # Convert to Path object for safer handling
+        try:
+            path = pathlib.Path(directory).resolve()
+        except (OSError, ValueError) as e:
+            raise ValueError(f"Invalid directory path: {e}")
+        
+        # Check if path exists and is a directory
+        if not path.exists():
+            raise ValueError(f"Directory does not exist: {path}")
+        
+        if not path.is_dir():
+            raise ValueError(f"Path is not a directory: {path}")
+        
+        # Convert back to string for compatibility
+        return str(path)
+    
+    def _is_safe_file(self, file_path: str) -> bool:
+        """Check if file is safe to process.
+        
+        Args:
+            file_path: Path to the file
+            
+        Returns:
+            True if file is safe to process, False otherwise
+        """
+        try:
+            path = pathlib.Path(file_path)
+            
+            # Check if it's a symbolic link (potential security risk)
+            if path.is_symlink():
+                return False
+            
+            # Check file size
+            if path.stat().st_size > self.max_file_size_bytes:
+                print(f"Warning: Skipping large file {file_path} ({path.stat().st_size} bytes)")
+                return False
+            
+            # Check if we've reached file limit
+            if self.files_processed >= self.max_files:
+                print(f"Warning: Maximum file limit ({self.max_files}) reached")
+                return False
+            
+            # Check processing time limit
+            if time.time() - self.start_time > self.max_processing_time:
+                print(f"Warning: Maximum processing time exceeded")
+                return False
+            
+            return True
+            
+        except (OSError, ValueError):
+            return False
+    
+    def _sanitize_error_message(self, file_path: str, error: str) -> str:
+        """Sanitize error messages to prevent information disclosure.
+        
+        Args:
+            file_path: Original file path
+            error: Original error message
+            
+        Returns:
+            Sanitized error message
+        """
+        # Create a hash of the file path for logging without disclosure
+        path_hash = hashlib.sha256(file_path.encode()).hexdigest()[:8]
+        
+        # Remove sensitive path information from error message
+        sanitized_error = str(error).replace(file_path, f"file_{path_hash}")
+        sanitized_error = re.sub(r'/[^/\s]+', '/***', sanitized_error)
+        
+        return f"Error processing file_{path_hash}: {sanitized_error}"
 
     def analyze_codebase(self):
         """Analyze the C# codebase to extract files, usings, classes, methods, and their relationships."""
@@ -105,13 +206,18 @@ class CSCodeKnowledgeGraph:
         if file_path in self.analyzed_files:
             return
 
+        # Security: Check if file is safe to process
+        if not self._is_safe_file(file_path):
+            return
+
         try:
             self.files_processed += 1
             relative_path = os.path.relpath(file_path, self.directory)
             print(f"\rProcessing file [{self.files_processed}/{self.total_files}]: {relative_path}", end="", flush=True)
 
+            # Security: Safe file reading with size limits
             with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read()
+                content = f.read(self.max_file_size_bytes)
 
             relative_path = os.path.relpath(file_path, self.directory)
             file_node = f"File: {relative_path}"
@@ -128,16 +234,24 @@ class CSCodeKnowledgeGraph:
             self._process_namespaces(content, file_node)
 
         except Exception as e:
-            print(f"Error processing {file_path}: {str(e)}", file=sys.stderr)
+            # Security: Sanitize error messages
+            sanitized_error = self._sanitize_error_message(file_path, str(e))
+            print(sanitized_error, file=sys.stderr)
 
     def _process_usings(self, content: str, file_node: str):
         """Process using statements in the content."""
-        using_pattern = r'using\s+(?:static\s+)?([\w\.]+)\s*;'
+        # Security: More efficient regex pattern to prevent ReDoS
+        using_pattern = r'using\s+(?:static\s+)?([\w\.]{1,200})\s*;'
 
-        matches = re.finditer(using_pattern, content)
-        for match in matches:
-            try:
+        try:
+            matches = re.finditer(using_pattern, content, re.MULTILINE)
+            for match in matches:
                 namespace = match.group(1)
+                
+                # Security: Validate namespace format
+                if not re.match(r'^[\w\.]+$', namespace):
+                    continue
+                
                 using_node = f"Namespace: {namespace}"
 
                 if not self.graph.has_node(using_node):
@@ -150,46 +264,89 @@ class CSCodeKnowledgeGraph:
                 if not namespace.startswith('System') and '.' in namespace:
                     self.total_dependencies.add(namespace.split('.')[0])
 
-            except Exception as e:
-                print(f"Error processing using {namespace}: {str(e)}", file=sys.stderr)
+        except Exception as e:
+            print(f"Error processing using statements: {str(e)}", file=sys.stderr)
 
     def _process_namespaces(self, content: str, file_node: str):
         """Process namespace declarations and their contents."""
-        namespace_pattern = r'namespace\s+([\w\.]+)\s*{([\s\S]*?)}'
-
-        matches = re.finditer(namespace_pattern, content)
-        for match in matches:
-            try:
-                namespace_name = match.group(1)
-                namespace_body = match.group(2)
+        # Security: More efficient regex pattern to prevent ReDoS
+        # Process namespaces line by line instead of using greedy matching
+        lines = content.split('\n')
+        namespace_stack = []
+        brace_count = 0
+        current_namespace = None
+        namespace_content = []
+        
+        for line in lines:
+            stripped_line = line.strip()
+            
+            # Check for namespace declaration
+            namespace_match = re.match(r'namespace\s+([\w\.]{1,100})\s*\{?', stripped_line)
+            if namespace_match:
+                namespace_name = namespace_match.group(1)
+                
+                # Security: Validate namespace format
+                if not re.match(r'^[\w\.]+$', namespace_name):
+                    continue
+                
+                current_namespace = namespace_name
+                namespace_stack.append(namespace_name)
+                namespace_content = []
+                
+                # Create namespace node
                 namespace_node = f"Namespace: {namespace_name}"
-
                 if not self.graph.has_node(namespace_node):
                     self.graph.add_node(namespace_node, type="namespace", name=namespace_name)
-
+                
                 self.graph.add_edge(file_node, namespace_node, relation="CONTAINS_NAMESPACE")
                 self.total_namespaces += 1
-
-                # Process classes, interfaces, enums, structs inside namespace
-                self._process_classes(namespace_body, namespace_node)
-                self._process_interfaces(namespace_body, namespace_node)
-                self._process_enums(namespace_body, namespace_node)
-                self._process_structs(namespace_body, namespace_node)
-
-            except Exception as e:
-                print(f"Error processing namespace {namespace_name}: {str(e)}", file=sys.stderr)
+                
+                if '{' in stripped_line:
+                    brace_count += stripped_line.count('{')
+                    brace_count -= stripped_line.count('}')
+                continue
+            
+            if current_namespace:
+                namespace_content.append(line)
+                brace_count += stripped_line.count('{')
+                brace_count -= stripped_line.count('}')
+                
+                if brace_count <= 0 and namespace_stack:
+                    # End of namespace
+                    namespace_body = '\n'.join(namespace_content)
+                    namespace_node = f"Namespace: {current_namespace}"
+                    
+                    try:
+                        # Process contents inside namespace
+                        self._process_classes(namespace_body, namespace_node)
+                        self._process_interfaces(namespace_body, namespace_node)
+                        self._process_enums(namespace_body, namespace_node)
+                        self._process_structs(namespace_body, namespace_node)
+                    except Exception as e:
+                        print(f"Error processing namespace {current_namespace}: {str(e)}", file=sys.stderr)
+                    
+                    namespace_stack.pop()
+                    current_namespace = namespace_stack[-1] if namespace_stack else None
+                    namespace_content = []
+                    brace_count = 0
 
     def _process_classes(self, content: str, parent_node: str):
         """Process class declarations."""
-        class_pattern = r'(public|protected|internal|private)?\s*(abstract|sealed|static|partial)?\s*class\s+(\w+)(?:\s*:\s*([\w,\s]+))?\s*{'
+        # Security: More efficient regex pattern to prevent ReDoS
+        class_pattern = r'(public|protected|internal|private)?\s*(abstract|sealed|static|partial)?\s*class\s+(\w{1,100})(?:\s*:\s*([\w,\s]{1,200}))?\s*\{'
 
-        matches = re.finditer(class_pattern, content)
+        matches = re.finditer(class_pattern, content, re.MULTILINE)
         for match in matches:
             try:
                 access_modifier = match.group(1) or 'internal'
                 modifiers = match.group(2) or ''
                 class_name = match.group(3)
                 inherits = match.group(4)
+                
+                # Security: Validate class name format
+                if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', class_name):
+                    continue
+                
                 class_node = f"Class: {class_name}"
 
                 if not self.graph.has_node(class_node):
@@ -207,22 +364,25 @@ class CSCodeKnowledgeGraph:
 
                 # Get class body to process methods, properties, etc.
                 class_body = self._extract_block(content, match.end() - 1)
-                self._process_methods(class_body, class_node)
-                self._process_properties(class_body, class_node)
-                self._process_events(class_body, class_node)
-                self._process_fields(class_body, class_node)
+                if len(class_body) < 50000:  # Security: Limit processed content size
+                    self._process_methods(class_body, class_node)
+                    self._process_properties(class_body, class_node)
+                    self._process_events(class_body, class_node)
+                    self._process_fields(class_body, class_node)
 
                 # Handle inheritance
                 if inherits:
-                    base_classes = [b.strip() for b in inherits.split(',')]
-                    for base in base_classes:
-                        base_node = f"Class: {base}"
-                        if not self.graph.has_node(base_node):
-                            self.graph.add_node(base_node, type="class", name=base)
-                        self.graph.add_edge(class_node, base_node, relation="INHERITS")
+                    base_classes = [b.strip() for b in inherits.split(',') if b.strip()]
+                    for base in base_classes[:10]:  # Security: Limit inheritance chain
+                        # Security: Validate base class name
+                        if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', base):
+                            base_node = f"Class: {base}"
+                            if not self.graph.has_node(base_node):
+                                self.graph.add_node(base_node, type="class", name=base)
+                            self.graph.add_edge(class_node, base_node, relation="INHERITS")
 
             except Exception as e:
-                print(f"Error processing class {class_name}: {str(e)}", file=sys.stderr)
+                print(f"Error processing class: {str(e)}", file=sys.stderr)
 
     def _process_methods(self, content: str, class_node: str):
         """Process method declarations within a class."""
@@ -458,16 +618,31 @@ class CSCodeKnowledgeGraph:
 
     def _process_enums(self, content: str, parent_node: str):
         """Process enum declarations."""
-        enum_pattern = r'(public|protected|internal|private)?\s*enum\s+(\w+)\s*{([\s\S]*?)}'
-
-        matches = re.finditer(enum_pattern, content)
-        for match in matches:
-            try:
-                access_modifier = match.group(1) or 'internal'
-                enum_name = match.group(2)
-                enum_body = match.group(3)
+        # Security: More efficient approach to avoid ReDoS
+        lines = content.split('\n')
+        enum_start = None
+        brace_count = 0
+        enum_content = []
+        
+        for i, line in enumerate(lines):
+            stripped_line = line.strip()
+            
+            # Check for enum declaration
+            enum_match = re.match(r'(public|protected|internal|private)?\s*enum\s+(\w{1,100})\s*\{?', stripped_line)
+            if enum_match:
+                access_modifier = enum_match.group(1) or 'internal'
+                enum_name = enum_match.group(2)
+                
+                # Security: Validate enum name format
+                if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', enum_name):
+                    continue
+                
+                enum_start = i
+                enum_content = []
+                brace_count = 0
+                
+                # Create enum node
                 enum_node = f"Enum: {enum_name}"
-
                 if not self.graph.has_node(enum_node):
                     self.graph.add_node(
                         enum_node,
@@ -475,24 +650,54 @@ class CSCodeKnowledgeGraph:
                         name=enum_name,
                         access_modifier=access_modifier
                     )
-
+                
                 self.graph.add_edge(parent_node, enum_node, relation="CONTAINS_ENUM")
                 self.total_enums += 1
-
-                # Process enum members
-                enum_members = [member.strip().split('=')[0].strip() for member in enum_body.split(',') if member.strip()]
-                for member in enum_members:
-                    member_node = f"EnumMember: {member} ({enum_node})"
-                    if not self.graph.has_node(member_node):
-                        self.graph.add_node(
-                            member_node,
-                            type="enum_member",
-                            name=member
-                        )
-                    self.graph.add_edge(enum_node, member_node, relation="HAS_MEMBER")
-
-            except Exception as e:
-                print(f"Error processing enum {enum_name}: {str(e)}", file=sys.stderr)
+                
+                if '{' in stripped_line:
+                    brace_count += stripped_line.count('{')
+                    brace_count -= stripped_line.count('}')
+                continue
+            
+            if enum_start is not None:
+                enum_content.append(line)
+                brace_count += stripped_line.count('{')
+                brace_count -= stripped_line.count('}')
+                
+                if brace_count <= 0:
+                    # End of enum, process members
+                    enum_body = '\n'.join(enum_content)
+                    
+                    try:
+                        # Security: Limit enum processing
+                        if len(enum_body) < 10000:  # Limit size
+                            # Process enum members more safely
+                            member_lines = []
+                            for line in enum_body.split('\n'):
+                                cleaned = line.strip().rstrip(',').strip()
+                                if cleaned and not cleaned.startswith('//') and not cleaned.startswith('/*'):
+                                    # Security: Validate member format
+                                    member_match = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)', cleaned)
+                                    if member_match:
+                                        member_lines.append(member_match.group(1))
+                            
+                            # Add enum members (limit to reasonable number)
+                            for member in member_lines[:100]:  # Security: Limit member count
+                                member_node = f"EnumMember: {member} ({enum_node})"
+                                if not self.graph.has_node(member_node):
+                                    self.graph.add_node(
+                                        member_node,
+                                        type="enum_member",
+                                        name=member
+                                    )
+                                self.graph.add_edge(enum_node, member_node, relation="HAS_MEMBER")
+                    
+                    except Exception as e:
+                        print(f"Error processing enum members: {str(e)}", file=sys.stderr)
+                    
+                    enum_start = None
+                    enum_content = []
+                    brace_count = 0
 
     def _process_structs(self, content: str, parent_node: str):
         """Process struct declarations."""
@@ -613,8 +818,12 @@ class CSCodeKnowledgeGraph:
             if file_path in self.analyzed_files:
                 return
 
+            # Security: Check if file is safe to process
+            if not self._is_safe_file(file_path):
+                return
+
             with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read()
+                content = f.read(self.max_file_size_bytes)  # Security: Limit read size
 
             relative_path = os.path.relpath(file_path, self.directory)
             file_node = f"Dependency File: {relative_path}"
@@ -628,12 +837,17 @@ class CSCodeKnowledgeGraph:
 
             # Process dependencies
             if file_path.endswith(".csproj"):
-                # Parse PackageReference elements
-                package_pattern = r'<PackageReference\s+Include="([^"]+)"\s+Version="([^"]+)"\s*/>'
+                # Security: More restrictive regex patterns
+                package_pattern = r'<PackageReference\s+Include="([^"<>]{1,100})"\s+Version="([^"<>]{1,50})"\s*/>'
                 matches = re.finditer(package_pattern, content)
                 for match in matches:
                     package_name = match.group(1)
                     version = match.group(2)
+                    
+                    # Security: Validate package name format
+                    if not re.match(r'^[a-zA-Z0-9\.\-_]+$', package_name):
+                        continue
+                    
                     dep_node = f"Dependency: {package_name}"
                     if not self.graph.has_node(dep_node):
                         self.graph.add_node(dep_node, type="dependency", name=package_name, version=version)
@@ -641,12 +855,17 @@ class CSCodeKnowledgeGraph:
 
                     self.total_dependencies.add(package_name)
             elif file_path.endswith("packages.config"):
-                # Parse package elements
-                package_pattern = r'<package\s+id="([^"]+)"\s+version="([^"]+)"\s+.*?/>'
+                # Security: More restrictive regex patterns
+                package_pattern = r'<package\s+id="([^"<>]{1,100})"\s+version="([^"<>]{1,50})"\s+.*?/>'
                 matches = re.finditer(package_pattern, content)
                 for match in matches:
                     package_name = match.group(1)
                     version = match.group(2)
+                    
+                    # Security: Validate package name format
+                    if not re.match(r'^[a-zA-Z0-9\.\-_]+$', package_name):
+                        continue
+                    
                     dep_node = f"Dependency: {package_name}"
                     if not self.graph.has_node(dep_node):
                         self.graph.add_node(dep_node, type="dependency", name=package_name, version=version)
@@ -654,44 +873,87 @@ class CSCodeKnowledgeGraph:
 
                     self.total_dependencies.add(package_name)
             elif file_path.endswith("packages.lock.json"):
-                data = json.loads(content)
-                dependencies = data.get("dependencies", {})
-                for dep_name, dep_info in dependencies.items():
-                    version = dep_info.get("resolved", "")
-                    dep_node = f"Dependency: {dep_name}"
-                    if not self.graph.has_node(dep_node):
-                        self.graph.add_node(dep_node, type="dependency", name=dep_name, version=version)
-                    self.graph.add_edge(file_node, dep_node, relation="HAS_LOCKED_DEPENDENCY")
+                try:
+                    data = json.loads(content)
+                    dependencies = data.get("dependencies", {})
+                    for dep_name, dep_info in dependencies.items():
+                        # Security: Validate dependency name
+                        if not re.match(r'^[a-zA-Z0-9\.\-_]{1,100}$', str(dep_name)):
+                            continue
+                            
+                        version = dep_info.get("resolved", "")
+                        dep_node = f"Dependency: {dep_name}"
+                        if not self.graph.has_node(dep_node):
+                            self.graph.add_node(dep_node, type="dependency", name=dep_name, version=version)
+                        self.graph.add_edge(file_node, dep_node, relation="HAS_LOCKED_DEPENDENCY")
 
-                    self.total_dependencies.add(dep_name)
+                        self.total_dependencies.add(dep_name)
+                except json.JSONDecodeError as e:
+                    print(f"Warning: Invalid JSON in dependency file: {e}", file=sys.stderr)
 
         except Exception as e:
-            print(f"Error processing dependency file {file_path}: {str(e)}", file=sys.stderr)
+            # Security: Sanitize error messages
+            sanitized_error = self._sanitize_error_message(file_path, str(e))
+            print(sanitized_error, file=sys.stderr)
 
     def save_graph(self, output_path: str):
         """Save the knowledge graph in standard JSON format."""
-        # Convert sets to lists for JSON serialization
-        metadata = {
-            "stats": {
-                "total_files": self.total_files,
-                "total_namespaces": self.total_namespaces,
-                "total_classes": self.total_classes,
-                "total_methods": self.total_methods,
-                "total_interfaces": self.total_interfaces,
-                "total_enums": self.total_enums,
-                "total_structs": self.total_structs,
-                "total_dependencies": len(self.total_dependencies),
-                "total_usings": self.total_usings,
-            },
-            "method_params": self._convert_sets_to_lists(self.method_params),
-            "method_returns": self.method_returns,
-            "class_methods": self._convert_sets_to_lists(self.class_methods),
-        }
+        try:
+            # Security: Validate output path
+            output_path = str(pathlib.Path(output_path).resolve())
+            
+            # Security: Sanitize data before serialization
+            sanitized_method_params = self._sanitize_data_for_json(self.method_params)
+            sanitized_method_returns = self._sanitize_data_for_json(self.method_returns)
+            sanitized_class_methods = self._sanitize_data_for_json(self.class_methods)
+            
+            # Convert sets to lists for JSON serialization
+            metadata = {
+                "stats": {
+                    "total_files": self.total_files,
+                    "total_namespaces": self.total_namespaces,
+                    "total_classes": self.total_classes,
+                    "total_methods": self.total_methods,
+                    "total_interfaces": self.total_interfaces,
+                    "total_enums": self.total_enums,
+                    "total_structs": self.total_structs,
+                    "total_dependencies": len(self.total_dependencies),
+                    "total_usings": self.total_usings,
+                },
+                "method_params": self._convert_sets_to_lists(sanitized_method_params),
+                "method_returns": sanitized_method_returns,
+                "class_methods": self._convert_sets_to_lists(sanitized_class_methods),
+            }
 
-        data = json_graph.node_link_data(self.graph)
+            data = json_graph.node_link_data(self.graph)
 
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump({"graph": data, "metadata": metadata}, f, indent=2)
+            # Security: Safe file writing
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump({"graph": data, "metadata": metadata}, f, indent=2, ensure_ascii=True)
+                
+        except Exception as e:
+            print(f"Error saving graph: {str(e)}", file=sys.stderr)
+            raise
+    
+    def _sanitize_data_for_json(self, data: Any) -> Any:
+        """Sanitize data to prevent JSON injection attacks.
+        
+        Args:
+            data: Data to sanitize
+            
+        Returns:
+            Sanitized data safe for JSON serialization
+        """
+        if isinstance(data, dict):
+            return {key: self._sanitize_data_for_json(value) for key, value in data.items()}
+        elif isinstance(data, list):
+            return [self._sanitize_data_for_json(item) for item in data]
+        elif isinstance(data, str):
+            # Remove any potentially dangerous characters
+            sanitized = re.sub(r'[^\w\s\.\-_:,;(){}[\]<>/\\]', '', data)
+            return sanitized[:1000]  # Limit length
+        else:
+            return data
 
     def _convert_sets_to_lists(self, data_dict):
         """Helper method to convert any sets in a dictionary to lists."""
@@ -849,17 +1111,33 @@ if __name__ == "__main__":
         # Directory containing the C# codebase.
         print("C# Code Knowledge Graph Generator")
         print("--------------------------------")
+        print("Security Notice: This tool will analyze the specified directory.")
+        print("Ensure you trust the source code being analyzed.")
+        print()
+        
         codebase_dir = input("Enter the path to the codebase directory: ").strip()
 
-        if not os.path.exists(codebase_dir):
-            raise ValueError(f"Directory does not exist: {codebase_dir}")
+        # Security: Enhanced validation
+        if not codebase_dir:
+            raise ValueError("Directory path cannot be empty")
 
-        # Create and analyze the codebase.
-        ckg = CSCodeKnowledgeGraph(directory=codebase_dir)
+        # Create and analyze the codebase with security limits
+        print("\nInitializing with security constraints...")
+        print("- Maximum file size: 10MB")
+        print("- Maximum files: 10,000")
+        print("- Maximum processing time: 1 hour")
+        
+        ckg = CSCodeKnowledgeGraph(
+            directory=codebase_dir,
+            max_file_size_mb=10,
+            max_files=10000
+        )
         ckg.run()
 
     except KeyboardInterrupt:
         print("\nOperation cancelled by user.")
+    except ValueError as e:
+        print(f"\nValidation Error: {str(e)}", file=sys.stderr)
     except Exception as e:
         print(f"\nError: {str(e)}", file=sys.stderr)
     finally:

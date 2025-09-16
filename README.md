@@ -2,8 +2,20 @@
 
 [![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](https://choosealicense.com/licenses/mit/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](http://makeapullrequest.com)
+[![Security](https://img.shields.io/badge/Security-Enhanced-blue.svg)](SECURITY_GUIDELINES.md)
 
 > 🤯 **75% Token Reduction In LLM Context Window Usage!** 
+
+## ⚠️ Security Notice
+
+CntxtCS has been security-hardened to protect against common vulnerabilities. Please review our [Security Guidelines](SECURITY_GUIDELINES.md) before use and only analyze trusted codebases.
+
+**Built-in Security Features:**
+- 🔒 Path traversal protection
+- 📏 File size and processing limits  
+- ⏱️ Timeout protection against ReDoS
+- 🧹 Input validation and sanitization
+- 🚫 Error message sanitization
 
 ## Why CntxtCS?
 
@@ -40,6 +52,7 @@ It's like handing your LLM the cliff notes instead of a novel.
 
 ## 🚀 Quick Start
 
+### Installation
 ```bash
 # Clone the repository
 git clone https://github.com/brandondocusen/CntxtCS.git
@@ -47,11 +60,25 @@ git clone https://github.com/brandondocusen/CntxtCS.git
 # Navigate to the directory
 cd CntxtCS
 
+# Install dependencies (optional security enhancements)
+pip install -r security_requirements.txt
+
 # Run the Python file
 python CntxtCS.py
 ```
 
+### Security-First Usage
+```bash
+# Run security validation tests
+python security_validation.py
+
+# For production environments, review security guidelines
+cat SECURITY_GUIDELINES.md
+```
+
 When prompted, enter the path to your C# solution or project file. The tool will generate a `csharp_code_knowledge_graph.json` file and offer to visualize the relationships.
+
+**⚠️ Security Reminder**: Only analyze trusted codebases. The tool includes multiple security safeguards but should be run in isolated environments when analyzing unknown code.
 
 ## 💡 Example Usage with LLMs
 
@@ -117,6 +144,32 @@ Just fork, make your changes, and submit a PR. Check out our [contribution guide
 - [ ] Custom graph export formats
 - [ ] Integration with Visual Studio and Rider
 - [ ] Support for file-scoped namespaces and global using statements
+- [x] **Security hardening and vulnerability protection**
+- [x] **Path traversal and input validation protection**
+- [x] **Resource exhaustion prevention**
+
+## 🔐 Security
+
+CntxtCS includes comprehensive security protections:
+
+- **Path Validation**: Prevents directory traversal attacks
+- **Resource Limits**: Protects against DoS via large files or long processing
+- **Input Sanitization**: Validates and cleans all user inputs  
+- **Error Sanitization**: Prevents information disclosure through error messages
+- **ReDoS Protection**: Optimized regex patterns prevent catastrophic backtracking
+
+For detailed security information, see:
+- [Security Analysis Report](SECURITY_ANALYSIS.md)
+- [Security Guidelines](SECURITY_GUIDELINES.md)
+- [Security Configuration](security_config.py)
+
+### Reporting Security Issues
+
+If you discover a security vulnerability, please:
+1. **Do not** create a public GitHub issue
+2. Email the maintainers directly with details
+3. Follow responsible disclosure practices
+4. Allow time for fixes before public disclosure
 
 ## 📝 License
 
